@@ -43,3 +43,19 @@ Aufgabenstellung des Projektes war es, mit einem ESP32 die Daten von mindestens 
 - E- - Schwarzes Kabel
 - A+ - Weisses Kabel
 - A- - Grünes oder gelbes Kabel
+
+## Aufbau der Software
+
+Die Software ist als simple StateMachine implementiert.
+
+### State Diagram
+
+(...) Folgt
+
+### Stati
+
+(...) Folgt
+
+### Transitions
+
+(...) Folgt

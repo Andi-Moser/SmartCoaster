@@ -2,7 +2,6 @@
 // Libraries
 //////////////////////////////////////////////////////////////////////
 
-#include "M5Stack.h"
 #include "HX711.h"
 #include "Adafruit_NeoPixel.h"
 #include "StateMachine.h"
@@ -11,14 +10,14 @@
 // IO Mapping
 //////////////////////////////////////////////////////////////////////
 #define LED_PIN             2
-#define LOADCELL_DOUT_PIN   16
-#define LOADCELL_SCK_PIN    17
+#define LOADCELL_DOUT_PIN   17
+#define LOADCELL_SCK_PIN    16
 
 //////////////////////////////////////////////////////////////////////
 // Configuration
 //////////////////////////////////////////////////////////////////////
 #define PIXELS_COUNT                  10
-#define LOADSELL_UNITS_PER_GRAMM      187
+#define LOADSELL_UNITS_PER_GRAMM      354
 
 //////////////////////////////////////////////////////////////////////
 // Calibration
@@ -53,17 +52,28 @@ State* s_Empty_Done = machine.addState(&stateEmptyDone);
 State* s_Calibrate_Full = machine.addState(&stateCalibrateFull);
 State* s_DrinkingIdle = machine.addState(&stateDrinkingIdle);
 State* s_DrinkingLiftup = machine.addState(&stateDrinkingLiftup);
+State* s_GlassEmpty = machine.addState(&stateGlassEmpty);
 
 // ****** StateInit
 int currentLedInit = 0;
+int initStandByCount = 0;
+bool standByMode = false;
 void stateInit() {
-  if (machine.executeOnce) {
-    M5.Lcd.fillScreen(BLACK);
-  }
   currentState = "Init";
-  showOnlySingleLED(currentLedInit++, g_Pixels.Color(0, 0, 255));
+  if (standByMode) {
+    lightAllLeds(g_Pixels.Color(0,0,0));
+  }
+  else {
+    showOnlySingleLED(currentLedInit++, g_Pixels.Color(0, 0, 255));
+  }
   if (currentLedInit == PIXELS_COUNT) {
     currentLedInit = 0;
+  }
+
+  initStandByCount++;
+  if (initStandByCount == (5 * 30)) {
+    initStandByCount = 0;
+    standByMode = true;
   }
 }
 
@@ -128,45 +138,42 @@ void stateCalibrateFull() {
   totalFullReads += getReading();
   if (++calibrateFullCounter == PIXELS_COUNT) {
     fullWeight = (long)(totalFullReads/PIXELS_COUNT);
-    contentWeight = fullWeight - contentWeight;
+    contentWeight = fullWeight - emptyWeight;
     calibrationFullDone = true;
   }
 }
 
 // ****** StateDrinkingIdle
 int currentPixelsShowing = 0;
-float ratio = 0;
+float ratio = 1;
 void stateDrinkingIdle() {
   currentState = "DrinkingIdle";
   long valueRaw = currentRead - emptyWeight;
 
-  //M5.Lcd.println("currentRead: " + String(currentRead));
-//  ratio = round2((float)currentRead / (float)fullWeight);
-
-
   drankWeight = fullWeight - currentRead;
-  ratio = round2((float)(drankWeight/contentWeight));
+  if (drankWeight < 0) {
+    drankWeight = 0;
+  }
+  ratio = round2((float)((float)drankWeight/(float)contentWeight));
 
   float ratioRed = ratio;
   float ratioGreen = 1 - ratioRed;
 
-  lightAllLeds(g_Pixels.Color(round(ratioRed * 255), round(ratioGreen * 255), 0));
-  /*int ledsToShow = round((float)ratio * (float)PIXELS_COUNT);
-
-  if (ledsToShow != currentPixelsShowing) {
-    currentPixelsShowing = ledsToShow;
-
-    showLEDUntil(currentPixelsShowing, g_Pixels.Color(0, 255, 0));
-  }*/
-
+  if (ratio <= 1) {
+    lightAllLeds(g_Pixels.Color(round(ratioRed * 255), round(ratioGreen * 255), 0));
+  }
 }
 
 // ******* stateDrinkingLiftup
 void stateDrinkingLiftup() {
   currentState = "DrinkingLiftup";
-  lightAllLeds(g_Pixels.Color(0,0,0));
+  lightAllLeds(g_Pixels.Color(0,0,255));
 }
 
+void stateGlassEmpty() {
+  currentState = "GlassEmpty";
+  lightAllLeds(g_Pixels.Color(0,0,0));
+}
 
 //////////////////////////////////////////////////////////////////////
 // Transitions
@@ -220,20 +227,41 @@ bool t_FullToDrinking() {
 }
 
 bool t_DrinkingIdleToLiftUp() {
-  return currentRead < 10;
+  return currentRead < 40;
 }
 
 bool t_LiftUpToDrinkingIdle() {
-  return currentRead > emptyWeight;
+  return (currentRead + 5) > emptyWeight;
 }
 
 int t_DrinkingIdleToInit_Counter = 0;
-bool t_DrinkingIdleToInit() {
-  if (abs(currentRead - emptyWeight) < 5) { // if, for 10 ticks, the difference between the currentRead and emptyWeight is less than 50g
+bool t_DrinkingIdleToEmpty() {
+  if (ratio > 0.95) { // if, for 10 ticks, the difference between the currentRead and emptyWeight is less than 50g
     t_DrinkingIdleToInit_Counter++;
 
     if (t_DrinkingIdleToInit_Counter == 10) {
       t_DrinkingIdleToInit_Counter = 0;
+
+      for (int i = 0; i < 5; i++) {
+        lightAllLeds(g_Pixels.Color(255, 0, 0));
+        delay(250);
+        lightAllLeds(g_Pixels.Color(0, 0, 0));
+        delay(250);
+      }
+      return true;
+    }
+    return false;
+  }
+  t_DrinkingIdleToInit_Counter = 0;
+  return false;
+}
+
+int t_EmptyToInitCounter = 0;
+bool t_EmptyToInit() {
+  if (currentRead < 10) {
+    t_EmptyToInitCounter++;
+    if (t_EmptyToInitCounter == 10) {
+      t_EmptyToInitCounter = 0;
       return true;
     }
   }
@@ -259,9 +287,7 @@ bool t_ToReset() {
 
 
 void setup() {
-  M5.begin();
-  M5.Power.begin();
-
+  Serial.begin(115200);
   g_LoadCell.begin(LOADCELL_DOUT_PIN, LOADCELL_SCK_PIN);
 
   long tareTotal = 0;
@@ -275,13 +301,17 @@ void setup() {
   s_Calibrate_Empty->addTransition(&t_EmptyCalibrationToEmptyDone, s_Empty_Done);
   s_Empty_Done->addTransition(&t_EmptyDoneToFull, s_Calibrate_Full);
   s_Calibrate_Full->addTransition(&t_FullToDrinking, s_DrinkingIdle);
-  s_DrinkingIdle->addTransition(&t_DrinkingIdleToInit, s_Init);
+  s_DrinkingIdle->addTransition(&t_DrinkingIdleToEmpty, s_GlassEmpty);
   s_DrinkingIdle->addTransition(&t_DrinkingIdleToLiftUp, s_DrinkingLiftup);
   s_DrinkingLiftup->addTransition(&t_LiftUpToDrinkingIdle, s_DrinkingIdle);
+  s_GlassEmpty->addTransition(&t_EmptyToInit, s_Init);
 
   // Resets
   s_DrinkingIdle->addTransition(&t_ToReset, s_Init);
   s_DrinkingLiftup->addTransition(&t_ToReset, s_Init);
+  //s_GlassEmpty->addTransition(&t_ToReset, s_Init);
+  //s_Empty_Done->addTransition(&t_ToReset, s_Init);
+  //s_Calibrate_Full->addTransition(&t_ToReset, s_Init);
 
 }
 
@@ -291,20 +321,20 @@ void loop() {
   if (abs(thisRead - lastRead) > 10) { // only detect changes above 10g
     lastRead = currentRead;
     currentRead = thisRead;
+    initStandByCount = 0;
+    standByMode = false;
   }
 
-//  M5.Lcd.fillScreen(BLACK);
-  M5.Lcd.setCursor(0, 0);
-  M5.Lcd.println("State: " + currentState + "      ");
-  M5.Lcd.println("fullWeight: " + String(fullWeight) + "     ");
-  M5.Lcd.println("emptyWeight: " + String(emptyWeight) + "      ");
-  M5.Lcd.println("drinkStatus: " + String(drankWeight) + " / " + String(contentWeight) + "        ");
-  M5.Lcd.println("currentRead: " + String(currentRead) + "       ");
-  M5.Lcd.println("ratio: " + String(ratio));
+  //Serial.println(thisRead);
+  //Serial.println("fullWeight: " + String(fullWeight) + "     ");
+  //Serial.println("emptyWeight: " + String(emptyWeight) + "      ");
+  //Serial.println("drinkStatus: " + String(drankWeight) + " / " + String(contentWeight) + "        ");
+  //Serial.println("currentRead: " + String(currentRead) + "       ");
+  //Serial.println("ratio: " + String(ratio));
   
+  Serial.println(String(ratio) + "\t\tempty: " + String(emptyWeight) + "\t\tfull: " + String(fullWeight) + "\t\tcurrent: " + String(currentRead) + "\t\tstate: " + currentState + "\t\tcontent: " + contentWeight + "\t\tdrank: " + drankWeight);
   machine.run();
   delay(200);
-  //showLEDFromUntil(6, 2, g_Pixels.Color(255,255,0));
 }
 
 //////////////////////////////////////////////////////////////////////
@@ -332,7 +362,6 @@ void showLEDUntil(int ledNumber, uint32_t color) {
 void showLEDFromUntil(int from, int until, uint32_t color) {
   if (from > until) {
       for (int i = 0; i < PIXELS_COUNT; i++) {
-        Serial.println(String(i) + " " + String(i <= until) + " " + String(i >= from));
         g_Pixels.setPixelColor(i, (i <= until || i >= from) ? color : g_Pixels.Color(0,0,0));
       }
       g_Pixels.show();
@@ -346,7 +375,7 @@ void showLEDFromUntil(int from, int until, uint32_t color) {
 }
 
 long getReading() {
-  return (long)((g_LoadCell.read() - tareFactor)/2/LOADSELL_UNITS_PER_GRAMM);
+  return (long)((g_LoadCell.read() - tareFactor)/LOADSELL_UNITS_PER_GRAMM);
 }
 
 float round2(float var)
